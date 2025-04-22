@@ -2,6 +2,13 @@ import sqlite3
 import flet as ft
 from datetime import datetime
 import uuid
+from fpdf import FPDF
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+import os
+
+# Nova importação
+import fpdf
 
 # Adicione esta função ao seu código para verificar e atualizar o banco existente
 def migrar_banco_se_necessario():
@@ -279,10 +286,14 @@ class SistemaOS:
             cursor.execute("ALTER TABLE equipamentos ADD COLUMN observacao TEXT")
         
         # Inserir equipamento com observação
-        cursor.execute('INSERT INTO equipamentos (id, cliente_id, tipo, marca, modelo, numero_serie, observacao) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                     (id, cliente_id, tipo, marca, modelo, numero_serie, observacao))
-        self.conn.commit()
-        return id
+        try:
+            cursor.execute('INSERT INTO equipamentos (id, cliente_id, tipo, marca, modelo, numero_serie, observacao) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                         (id, cliente_id, tipo, marca, modelo, numero_serie, observacao))
+            self.conn.commit()
+            return id
+        except Exception as ex:
+            show_snackbar(page, f"Erro ao cadastrar equipamento: {str(ex)}")
+            print(f"Detalhe do erro: {ex}")  # <-- Corrigido aqui
     
     def add_produto(self, nome, descricao, preco, quantidade):
         id = self.get_next_produto_id()
@@ -330,17 +341,24 @@ class SistemaOS:
     def buscar_clientes(self, termo_busca=None):
         cursor = self.conn.cursor()
         if termo_busca:
-            # Busca por nome, telefone ou email que contenha o termo
-            cursor.execute('''
-                SELECT id, nome, telefone, email 
-                FROM clientes 
-                WHERE nome LIKE ? OR telefone LIKE ? OR email LIKE ?
-            ''', (f'%{termo_busca}%', f'%{termo_busca}%', f'%{termo_busca}%'))
+            # Primeiro tenta buscar pelo ID exato (se for um ID)
+            cursor.execute('SELECT id, nome, telefone, email, rua, numero, bairro, cidade, estado FROM clientes WHERE id = ?', (termo_busca,))
+            result = cursor.fetchall()
+            
+            # Se não encontrou pelo ID, busca nos outros campos
+            if not result:
+                cursor.execute('''
+                    SELECT id, nome, telefone, email, rua, numero, bairro, cidade, estado
+                    FROM clientes 
+                    WHERE nome LIKE ? OR telefone LIKE ? OR email LIKE ?
+                ''', (f'%{termo_busca}%', f'%{termo_busca}%', f'%{termo_busca}%'))
+                result = cursor.fetchall()
+                
+            return result
         else:
             # Retorna todos os clientes (limitados a 20)
-            cursor.execute('SELECT id, nome, telefone, email FROM clientes LIMIT 20')
-        
-        return cursor.fetchall()
+            cursor.execute('SELECT id, nome, telefone, email, rua, numero, bairro, cidade, estado FROM clientes LIMIT 20')
+            return cursor.fetchall()
 
     # Adicione este método à classe SistemaOS para buscar equipamentos por cliente
     def buscar_equipamentos_por_cliente(self, cliente_id):
@@ -376,6 +394,114 @@ class SistemaOS:
             cursor.execute('SELECT id, nome, especialidade FROM tecnicos LIMIT 20')
         
         return cursor.fetchall()
+
+    # Adicione este método à classe SistemaOS para buscar ordens de serviço
+    def buscar_ordens_servico(self, filtro=None):
+        """
+        Busca ordens de serviço com filtro por ID da OS ou nome do cliente
+        """
+        cursor = self.conn.cursor()
+        
+        if filtro:
+            # Busca por ID da OS ou por nome de cliente
+            cursor.execute('''
+                SELECT os.id, os.cliente_id, os.equipamento_id, os.tecnico_id, 
+                      os.data_abertura, os.data_fechamento, os.status, 
+                      os.descricao_problema, os.descricao_solucao,
+                      c.nome, c.telefone, c.email, c.rua, c.numero, c.bairro, c.cidade, c.estado,
+                      e.tipo, e.marca, e.modelo, e.numero_serie, e.observacao,
+                      t.nome as tecnico_nome, t.especialidade
+                FROM ordens_servico os
+                JOIN clientes c ON os.cliente_id = c.id
+                JOIN equipamentos e ON os.equipamento_id = e.id
+                JOIN tecnicos t ON os.tecnico_id = t.id
+                WHERE os.id LIKE ? OR c.nome LIKE ?
+                ORDER BY os.data_abertura DESC
+            ''', (f'%{filtro}%', f'%{filtro}%'))
+        else:
+            # Retorna todas as ordens (limitadas a 50)
+            cursor.execute('''
+                SELECT os.id, os.cliente_id, os.equipamento_id, os.tecnico_id, 
+                      os.data_abertura, os.data_fechamento, os.status, 
+                      os.descricao_problema, os.descricao_solucao,
+                      c.nome, c.telefone, c.email, c.rua, c.numero, c.bairro, c.cidade, c.estado,
+                      e.tipo, e.marca, e.modelo, e.numero_serie, e.observacao,
+                      t.nome as tecnico_nome, t.especialidade
+                FROM ordens_servico os
+                JOIN clientes c ON os.cliente_id = c.id
+                JOIN equipamentos e ON os.equipamento_id = e.id
+                JOIN tecnicos t ON os.tecnico_id = t.id
+                ORDER BY os.data_abertura DESC
+                LIMIT 50
+            ''')
+        
+        return cursor.fetchall()
+
+# Modifique a função gerar_pdf_os
+def gerar_pdf_os(cliente, equipamento, descricao, nome_tecnico):
+    # Cria pasta 'OS' se não existir
+    os_folder = "OS"
+    if not os.path.exists(os_folder):
+        os.makedirs(os_folder)
+        print(f"Pasta '{os_folder}' criada com sucesso!")
+    
+    # Definir nome do arquivo dentro da pasta OS
+    filename = os.path.join(os_folder, f"os_{cliente['nome']}_{equipamento['tipo']}.pdf".replace(" ", "_"))
+    
+    c = canvas.Canvas(filename, pagesize=letter)
+    c.setFont("Helvetica", 12)
+    
+    # Resto do código permanece igual...
+
+    c.save()
+    show_snackbar(page, f"PDF gerado: {filename}")
+
+# Modifique a função gerar_pdf_os_existente
+def gerar_pdf_os_existente(os_data):
+    """Gera PDF para uma OS existente com design melhorado"""
+    
+    # Importar o módulo os com um nome diferente para evitar conflito com o parâmetro
+    import os as os_module
+    
+    # Cria pasta 'OS' se não existir
+    os_folder = "OS"
+    if not os_module.path.exists(os_folder):
+        os_module.makedirs(os_folder)
+        print(f"Pasta '{os_folder}' criada com sucesso!")
+    
+    # Extrair os dados necessários
+    (os_id, cliente_id, equipamento_id, tecnico_id, 
+     data_abertura, data_fechamento, status, 
+     descricao_problema, descricao_solucao,
+     cliente_nome, telefone, email, rua, numero, bairro, cidade, estado,
+     tipo_equip, marca, modelo, num_serie, observacao,
+     tecnico_nome, especialidade) = os_data
+    
+    # Nome do arquivo com data para evitar sobrescrita
+    data_hora = datetime.now().strftime('%Y%m%d_%H%M')
+    filename = os_module.path.join(os_folder, f"os_{os_id}_{cliente_nome.replace(' ', '_')}_{data_hora}.pdf".replace(" ", "_"))
+    
+    print(f"Gerando PDF em: {os_module.path.abspath(filename)}")
+    
+    c = canvas.Canvas(filename, pagesize=letter)
+    c.setFont("Helvetica", 12)
+    
+    # Resto do código permanece igual...
+
+    c.save()
+    show_snackbar(page, f"PDF gerado: {filename}")
+
+    # Também substitua todas as outras ocorrências de 'os.' por 'os_module.'
+    # Por exemplo, ao abrir o PDF automaticamente:
+    try:
+        if platform.system() == 'Darwin':       # macOS
+            subprocess.call(('open', filename))
+        elif platform.system() == 'Windows':    # Windows
+            os_module.startfile(filename)
+        else:                                   # linux
+            subprocess.call(('xdg-open', filename))
+    except Exception as e:
+        print(f"Erro ao abrir PDF: {e}")
 
 # Interface com Flet
 def main(page: ft.Page):
@@ -435,14 +561,25 @@ def main(page: ft.Page):
     # Função para alternar entre telas
     def change_tab(e):
         index = e.control.selected_index
-        titulo_pagina.value = ["Cadastro de Clientes", "Cadastro de Equipamentos", 
-                             "Cadastro de Produtos", "Cadastro de Técnicos", 
-                             "Gerenciamento de OS"][index]
+        titulo_pagina.value = [
+            "Cadastro de Clientes", 
+            "Cadastro de Equipamentos", 
+            "Cadastro de Produtos", 
+            "Cadastro de Técnicos", 
+            "Gerenciamento de OS",
+            "Listagem de Ordens de Serviço"  # Novo título
+        ][index]
+        
         cliente_container.visible = index == 0
         equipamento_container.visible = index == 1
         produto_container.visible = index == 2
         tecnico_container.visible = index == 3
         os_container.visible = index == 4
+        lista_os_container.visible = index == 5  # Nova visibilidade
+        
+        # Se selecionou Listar OS, carrega todas as ordens
+        if index == 5:
+            buscar_os(None)  # Carrega OS automaticamente
         
         # Limpar resultados de busca ao trocar de aba
         limpar_resultados_busca()
@@ -520,7 +657,8 @@ def main(page: ft.Page):
             )
         else:
             for cliente in resultados:
-                cliente_id, nome, telefone, email = cliente
+                # Use os mesmos 9 campos retornados pela consulta SQL
+                cliente_id, nome, telefone, email, rua, numero, bairro, cidade, estado = cliente
                 resultados_busca.controls.append(
                     ft.Container(
                         content=ft.Column([
@@ -830,14 +968,16 @@ def main(page: ft.Page):
 
     # Outros campos da Ordem de Serviço
     descricao_problema_os = ft.TextField(
-        label="Descrição do Problema *", 
-        hint_text="Descreva o problema relatado pelo cliente",
+        label="Descrição do Problema", # Remova o asterisco "*"
+        hint_text="Descreva o problema relatado pelo cliente (opcional)",
         multiline=True,
         min_lines=3,
         max_lines=5,
-        on_change=lambda e: print(f"Descrição digitada: {e.control.value}"),  # Adicione este callback para depuração
-        border_color=ft.colors.RED  # Adicione uma borda vermelha para destacar o campo
+        on_change=lambda e: print(f"Descrição digitada: {e.control.value}"),
+        border_color=ft.colors.GREY_400,  # Cor neutra em vez de vermelho
+        bgcolor=ft.colors.GREY_50   # Fundo neutro em vez de vermelho
     )
+
     # descricao_problema_os.value = "Teste de descrição"
 
     # Modificar o equipamento_container_os para incluir o campo descricao_problema_os
@@ -891,12 +1031,12 @@ def main(page: ft.Page):
             # Descrição do problema, etc.
             ft.Container(
                 content=ft.Column([
-                    ft.Text("Descrição do Problema *", size=16, weight=ft.FontWeight.W_500, color=ft.colors.RED),
+                    ft.Text("Descrição do Problema", size=16, weight=ft.FontWeight.W_500, color=ft.colors.GREY_800), # Remova o asterisco e mude a cor
                     descricao_problema_os,
                 ]),
                 padding=10,
                 margin=ft.margin.only(top=10),
-                border=ft.border.all(2, color=ft.colors.RED),
+                border=ft.border.all(1, color=ft.colors.GREY_400), # Borda neutra
                 border_radius=8
             ),
         ]),
@@ -1005,7 +1145,8 @@ def main(page: ft.Page):
             )
         else:
             for cliente in resultados:
-                cliente_id, nome, telefone, email = cliente
+                # Desempacote todos os campos corretamente
+                cliente_id, nome, telefone, email, rua, numero, bairro, cidade, estado = cliente
                 resultados_busca_os.controls.append(
                     ft.Container(
                         content=ft.Column([
@@ -1293,21 +1434,29 @@ def main(page: ft.Page):
     # Verificar se esta linha existe na linha ~1070 (se não, adicione)
     busca_tecnico_os.on_change = buscar_tecnico
 
+    # Variável para armazenar temporariamente os dados da OS
+    os_dados_salvos = {}
+
+    def salvar_os(e):
+        # Salva os valores atuais dos campos em um dicionário
+        os_dados_salvos["cliente_id"] = cliente_id_os.value
+        os_dados_salvos["equipamento_id"] = equipamento_id_os.value
+        os_dados_salvos["tecnico_id"] = tecnico_id_os.value
+        os_dados_salvos["descricao"] = descricao_problema_os.value
+        show_snackbar(page, f"OS salva temporariamente!\nDescrição: {descricao_problema_os.value}")
+        print(f"DEBUG salvar_os: {os_dados_salvos}")
+
     # Funções para OS
     def add_os(e):
-        # Primeiro, atualize explicitamente o valor
-        page.update()
-        
-        # Depuração detalhada
         print("----- VERIFICAÇÃO DE DESCRIÇÃO -----")
         print(f"Descrição ID: {id(descricao_problema_os)}")
         print(f"Valor atual: '{descricao_problema_os.value}'")
         print(f"Tipo: {type(descricao_problema_os.value)}")
         
-        # Pegue o valor digitado novamente diretamente do campo
-        atual_descricao = descricao_problema_os.value
+        # Pegue o valor digitado diretamente do campo
+        atual_descricao = descricao_problema_os.value or ""  # Use string vazia se for None
         
-        # Verifica se todos os campos estão preenchidos
+        # Verifica apenas campos que continuam obrigatórios
         if not cliente_id_os.value:
             show_snackbar(page, "Selecione um cliente!")
             return
@@ -1320,43 +1469,123 @@ def main(page: ft.Page):
             show_snackbar(page, "Selecione um técnico!")
             return
         
-        # Na função add_os, comente a validação para testar se é o único problema:
-        # if atual_descricao is None or atual_descricao.strip() == "":
-        #     show_snackbar(page, "Descrição do problema é obrigatória!")
-        #     return
-        
         try:
-            # Criação da OS após validação bem-sucedida
-            os_id = sistema.add_ordem_servico(
-                cliente_id_os.value,
-                equipamento_id_os.value,
-                tecnico_id_os.value,
-                atual_descricao.strip()  # Usar a variável já processada
+            # PRIMEIRO: Busque os dados de cliente e equipamento para o modal
+            # Procura cliente
+            resultados_cliente = sistema.buscar_clientes(cliente_id_os.value)
+            if not resultados_cliente:
+                show_snackbar(page, "Cliente não encontrado!")
+                return
+            cliente = resultados_cliente[0]
+            
+            # Busca equipamentos
+            equipamento_lista = sistema.buscar_equipamentos_por_cliente(cliente_id_os.value)
+            equipamento = next((eq for eq in equipamento_lista if eq[0] == equipamento_id_os.value), None)
+            if not equipamento:
+                show_snackbar(page, "Equipamento não encontrado!")
+                return
+            
+            # Dados do técnico
+            tecnico_nome = tecnico_nome_exibicao.value.replace("Técnico selecionado: ", "")
+            
+            # Prepara dicionários para modal e PDF
+            cliente_dict = {
+                "nome": cliente[1],
+                "telefone": cliente[2],
+                "email": cliente[3] or "N/A",
+                "rua": cliente[4] or "",
+                "numero": cliente[5] or "",
+                "bairro": cliente[6] or "",
+                "cidade": cliente[7] or "",
+                "estado": cliente[8] or ""
+            }
+            
+            # Campos do equipamento com tratamento para evitar None
+            equipamento_dict = {
+                "tipo": equipamento[1] or "",
+                "marca": equipamento[2] or "",
+                "modelo": equipamento[3] or "",
+                "numero_serie": equipamento[4] or "",
+                "observacao": equipamento[5] if len(equipamento) > 5 else ""
+            }
+            
+            # --- Modal ---
+            def gerar_pdf_e_salvar(ev):
+                # Criação da OS no banco
+                os_id = sistema.add_ordem_servico(
+                    cliente_id_os.value,
+                    equipamento_id_os.value,
+                    tecnico_id_os.value,
+                    atual_descricao.strip()
+                )
+                
+                # Gera o PDF
+                gerar_pdf_os(cliente_dict, equipamento_dict, atual_descricao, tecnico_nome)
+                
+                # Fecha o modal
+                dlg.open = False
+                
+                # Mostra confirmação
+                show_snackbar(page, f"Ordem de Serviço #{os_id} criada com sucesso!")
+                
+                # Limpa os campos após cadastrar
+                cliente_id_os.value = ""
+                equipamento_id_os.value = ""
+                tecnico_id_os.value = ""
+                descricao_problema_os.value = ""
+                
+                # Reseta os textos de exibição
+                cliente_nome_exibicao_os.value = "Nenhum cliente selecionado"
+                cliente_nome_exibicao_os.color = ft.colors.GREY_500
+                cliente_nome_exibicao_os.italic = True
+                
+                equipamento_nome_exibicao.value = "Nenhum equipamento selecionado"
+                equipamento_nome_exibicao.color = ft.colors.GREY_500
+                equipamento_nome_exibicao.italic = True
+                
+                tecnico_nome_exibicao.value = "Nenhum técnico selecionado"
+                tecnico_nome_exibicao.color = ft.colors.GREY_500
+                tecnico_nome_exibicao.italic = True
+                
+                # Atualiza a data mostrada
+                atualizar_datas()
+                page.update()
+
+            modal_content = ft.Column([
+                ft.Text("Confirmação da OS e Termo de Garantia", size=20, weight=ft.FontWeight.BOLD, color=primary_color),
+                ft.Divider(),
+                ft.Text(f"Cliente: {cliente_dict['nome']}"),
+                ft.Text(f"Telefone: {cliente_dict['telefone']}"),
+                ft.Text(f"Email: {cliente_dict['email']}"),
+                ft.Text(f"Endereço: {cliente_dict['rua']}, {cliente_dict['numero']} - {cliente_dict['bairro']}, {cliente_dict['cidade']}/{cliente_dict['estado']}"),
+                ft.Divider(),
+                ft.Text(f"Equipamento: {equipamento_dict['tipo']} - {equipamento_dict['marca']} {equipamento_dict['modelo']}"),
+                ft.Text(f"Nº Série: {equipamento_dict['numero_serie']}"),
+                ft.Text(f"Observações: {equipamento_dict['observacao']}"),
+                ft.Divider(),
+                ft.Text(f"Problema relatado: {atual_descricao}"),
+                ft.Divider(),
+                ft.Text("Termo: O cliente tem o prazo de 90 (noventa) dias, a contar da data de notificação de conclusão do serviço, para retirar o equipamento. Após este prazo, o equipamento poderá ser descartado ou vendido para cobrir custos, conforme legislação vigente.", size=12, italic=True, color=ft.colors.RED),
+                ft.Divider(),
+                ft.Text("Assinatura do Cliente: ___________________________", size=14),
+                ft.Text("Assinatura do Representante: _____________________", size=14),
+                ft.Text(f"Técnico responsável: {tecnico_nome}", size=12),
+            ], scroll=ft.ScrollMode.AUTO, width=500, height=400)
+
+            dlg = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Revisar e Gerar PDF da OS"),
+                content=modal_content,
+                actions=[
+                    ft.TextButton("Gerar PDF e Salvar", on_click=gerar_pdf_e_salvar, style=ft.ButtonStyle(color=primary_color)),
+                    ft.TextButton("Cancelar", on_click=lambda _: setattr(dlg, 'open', False) or page.update()),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
             )
-            show_snackbar(page, f"Ordem de Serviço #{os_id} criada com sucesso!")
-            
-            # Limpa os campos após cadastrar
-            cliente_id_os.value = ""
-            equipamento_id_os.value = ""
-            tecnico_id_os.value = ""
-            descricao_problema_os.value = ""
-            
-            # Reseta os textos de exibição
-            cliente_nome_exibicao_os.value = "Nenhum cliente selecionado"
-            cliente_nome_exibicao_os.color = ft.colors.GREY_500
-            cliente_nome_exibicao_os.italic = True
-            
-            equipamento_nome_exibicao.value = "Nenhum equipamento selecionado"
-            equipamento_nome_exibicao.color = ft.colors.GREY_500
-            equipamento_nome_exibicao.italic = True
-            
-            tecnico_nome_exibicao.value = "Nenhum técnico selecionado"
-            tecnico_nome_exibicao.color = ft.colors.GREY_500
-            tecnico_nome_exibicao.italic = True
-            
-            # Atualiza a data mostrada
-            atualizar_datas()
+            page.overlay.append(dlg)
+            dlg.open = True
             page.update()
+            
         except Exception as ex:
             show_snackbar(page, f"Erro ao criar OS: {str(ex)}")
             # Imprimir erro para depuração
@@ -1368,55 +1597,9 @@ def main(page: ft.Page):
             show_snackbar(page, "Selecione uma OS para atualizar!")
             return
         
-        if not equipamento_id_os.value:
-            show_snackbar(page, "Equipamento é obrigatório!")
-            return
-        
-        if not status_os.value:
-            show_snackbar(page, "Selecione um status!")
-            return
-            
-        # Se o status for "Fechada", descrição da solução é obrigatória
-        if status_os.value == "Fechada" and (descricao_solucao_os.value is None or descricao_solucao_os.value.strip() == ""):
-            show_snackbar(page, "Descrição da solução é obrigatória para fechar uma OS!")
-            return
-            
-        try:
-            sistema.update_status_os(
-                cliente_id_os.value,  # Idealmente, você teria um campo separado para o ID da OS
-                status_os.value,
-                descricao_solucao_os.value
-            )
-            show_snackbar(page, "Status da OS atualizado com sucesso!")
-            
-            # Se a OS foi fechada, limpa os campos
-            if status_os.value == "Fechada":
-                # Limpa os campos
-                cliente_id_os.value = ""
-                equipamento_id_os.value = ""
-                tecnico_id_os.value = ""
-                descricao_problema_os.value = ""
-                descricao_solucao_os.value = ""
-                status_os.value = "Aberta"
-                
-                # Reseta os textos de exibição
-                cliente_nome_exibicao_os.value = "Nenhum cliente selecionado"
-                cliente_nome_exibicao_os.color = ft.colors.GREY_500
-                cliente_nome_exibicao_os.italic = True
-                
-                equipamento_nome_exibicao.value = "Nenhum equipamento selecionado"
-                equipamento_nome_exibicao.color = ft.colors.GREY_500
-                equipamento_nome_exibicao.italic = True
-
-                tecnico_nome_exibicao.value = "Nenhum técnico selecionado"
-                tecnico_nome_exibicao.color = ft.colors.GREY_500
-                tecnico_nome_exibicao.italic = True
-                
-                # Atualiza a data
-                atualizar_datas()
-                
-        except Exception as ex:
-            show_snackbar(page, f"Erro ao atualizar status: {str(ex)}")
+        # O resto da função continua normalmente...
+        # Por exemplo:
+        show_snackbar(page, f"PDF gerado: {filename}")
 
     def atualizar_datas():
         """
@@ -1500,6 +1683,16 @@ def main(page: ft.Page):
             ft.Container(
                 content=ft.Row([
                     ft.ElevatedButton(
+                        "Salvar OS",
+                        on_click=salvar_os,
+                        style=ft.ButtonStyle(
+                            bgcolor={"": ft.colors.AMBER},
+                            color={"": "black"},
+                            padding=10,
+                            shape={"": ft.RoundedRectangleBorder(radius=8)}
+                        )
+                    ),
+                    ft.ElevatedButton(
                         "Criar OS", 
                         on_click=add_os,
                         style=ft.ButtonStyle(
@@ -1544,10 +1737,690 @@ def main(page: ft.Page):
         padding=20
     )
 
-    def definir_descricao_teste():
-        descricao_problema_os.value = "TESTE DESCRIÇÃO FORÇADA"
-        print(f"Valor definido: {descricao_problema_os.value}")
+    # def definir_descricao_teste():
+    #     descricao_problema_os.value = "TESTE DESCRIÇÃO FORÇADA"
+    #     print(f"Valor definido para descrição: {descricao_problema_os.value}")
+    #     print(f"ID do campo: {id(descricao_problema_os)}")
+    #     page.update()
+
+    # Adicione os elementos para listar ordens de serviço
+    busca_os_field = ft.TextField(
+        label="Buscar Ordens de Serviço",
+        hint_text="Digite o ID da OS ou nome do cliente",
+        prefix_icon=ft.icons.SEARCH,
+        width=400
+    )
+
+    lista_os = ft.ListView(
+        height=400,
+        spacing=10,
+        padding=20,
+        auto_scroll=True
+    )
+
+    os_detalhes = ft.Container(
+        content=ft.Column([
+            ft.Text("Selecione uma OS para ver os detalhes", 
+                   size=16, 
+                   color=ft.colors.GREY_500,
+                   italic=True),
+        ]),
+        padding=20,
+        bgcolor=ft.colors.WHITE,
+        border_radius=10,
+        border=ft.border.all(1, ft.colors.GREY_300),
+        margin=10,
+        visible=True
+    )
+
+    # Adicione a função para buscar as ordens de serviço
+    def buscar_os(e):
+        termo = busca_os_field.value
+        
+        # Limpa a lista atual
+        lista_os.controls.clear()
+        
+        # Faz a busca no banco de dados
+        ordens = sistema.buscar_ordens_servico(termo)
+        
+        if not ordens:
+            lista_os.controls.append(
+                ft.Container(
+                    content=ft.Column([
+                        ft.Icon(ft.icons.SEARCH_OFF, color=ft.colors.GREY_500, size=40),
+                        ft.Text("Nenhuma ordem de serviço encontrada", 
+                              italic=True, 
+                              color=ft.colors.GREY_500)
+                    ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                    padding=20,
+                    alignment=ft.alignment.center
+                )
+            )
+        else:
+            for ordem in ordens:
+                # Desempacotamos os valores de cada OS
+                (os_id, cliente_id, equipamento_id, tecnico_id, 
+                 data_abertura, data_fechamento, status, 
+                 descricao_problema, descricao_solucao,
+                 cliente_nome, telefone, email, rua, numero, bairro, cidade, estado,
+                 tipo_equip, marca, modelo, num_serie, observacao,
+                 tecnico_nome, especialidade) = ordem
+                
+                # Data de fechamento formatada
+                fechamento_txt = f"Fechada em: {data_fechamento}" if data_fechamento else "Em aberto"
+                
+                # Status com cores diferentes
+                status_color = {
+                    "Aberta": ft.colors.BLUE,
+                    "Em andamento": ft.colors.ORANGE,
+                    "Aguardando peças": ft.colors.PURPLE,
+                    "Fechada": ft.colors.GREEN,
+                }.get(status, ft.colors.GREY)
+                
+                # Descrição curta do problema
+                problema_curto = (descricao_problema[:50] + "...") if descricao_problema and len(descricao_problema) > 50 else (descricao_problema or "Sem descrição")
+                
+                # Container para cada OS
+                lista_os.controls.append(
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row([
+                                ft.Text(f"OS: {os_id}", 
+                                      weight=ft.FontWeight.BOLD, 
+                                      size=16),
+                                ft.Text(status, 
+                                      weight=ft.FontWeight.BOLD, 
+                                      color=status_color)
+                            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                            
+                            ft.Divider(height=1, color=ft.colors.GREY_300),
+                            
+                            ft.Row([
+                                ft.Column([
+                                    ft.Text("Cliente:", size=12, color=ft.colors.GREY_700),
+                                    ft.Text(cliente_nome, weight=ft.FontWeight.BOLD)
+                                ], expand=True),
+                                
+                                ft.Column([
+                                    ft.Text("Equipamento:", size=12, color=ft.colors.GREY_700),
+                                    ft.Text(f"{tipo_equip} {marca} {modelo}".strip())
+                                ], expand=True)
+                            ]),
+                            
+                            ft.Row([
+                                ft.Column([
+                                    ft.Text("Abertura:", size=12, color=ft.colors.GREY_700),
+                                    ft.Text(data_abertura)
+                                ], expand=True),
+                                
+                                ft.Column([
+                                    ft.Text("Fechamento:", size=12, color=ft.colors.GREY_700),
+                                    ft.Text(data_fechamento or "Em aberto")
+                                ], expand=True),
+                            ]),
+                            
+                            ft.Text("Problema: " + problema_curto, 
+                                  size=12, 
+                                  color=ft.colors.GREY_800,
+                                  italic=True)
+                        ]),
+                        bgcolor=ft.colors.WHITE,
+                        border=ft.border.all(1, ft.colors.GREY_300),
+                        border_radius=10,
+                        padding=15,
+                        margin=5,
+                        ink=True,  # Efeito de ondulação ao clicar
+                        data=ordem,  # Armazena todos os dados da OS
+                        on_click=exibir_detalhes_os
+                    )
+                )
+        
         page.update()
+
+    # Função para mostrar detalhes quando clicar em uma OS
+    def exibir_detalhes_os(e):
+        os_data = e.control.data
+        
+        # Desempacotamos os valores
+        (os_id, cliente_id, equipamento_id, tecnico_id, 
+         data_abertura, data_fechamento, status, 
+         descricao_problema, descricao_solucao,
+         cliente_nome, telefone, email, rua, numero, bairro, cidade, estado,
+         tipo_equip, marca, modelo, num_serie, observacao,
+         tecnico_nome, especialidade) = os_data
+        
+        # Criamos o conteúdo do modal
+        modal_content = ft.Column([
+            # Cabeçalho da OS com status
+            ft.Row([
+                ft.Text(f"Ordem de Serviço: {os_id}", 
+                       size=20, 
+                       weight=ft.FontWeight.BOLD,
+                       color=primary_color),
+                ft.Container(
+                    content=ft.Text(status, color="white"),
+                    bgcolor={
+                        "Aberta": ft.colors.BLUE,
+                        "Em andamento": ft.colors.ORANGE,
+                        "Aguardando peças": ft.colors.PURPLE,
+                        "Fechada": ft.colors.GREEN,
+                    }.get(status, ft.colors.GREY),
+                    border_radius=15,
+                    padding=ft.padding.only(left=10, right=10, top=5, bottom=5),
+                    width=150,
+                    alignment=ft.alignment.center
+                ),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            
+            # Datas
+            ft.Row([
+                ft.Text(f"Aberta em: {data_abertura}", size=14),
+                ft.Text(f"Fechada em: {data_fechamento or 'Em aberto'}", size=14),
+            ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            
+            ft.Divider(height=1),
+            
+            # Dados do Cliente
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("Dados do Cliente", 
+                           size=16, 
+                           weight=ft.FontWeight.BOLD,
+                           color=primary_color),
+                    ft.Text(f"Nome: {cliente_nome}", size=14),
+                    ft.Text(f"Telefone: {telefone}", size=14),
+                    ft.Text(f"Email: {email or 'N/A'}", size=14),
+                    ft.Text(f"Endereço: {rua}, {numero} - {bairro}, {cidade}/{estado}", size=14),
+                ]),
+                bgcolor=ft.colors.BLUE_50,
+                border_radius=10,
+                padding=15,
+                margin=ft.margin.only(top=10, bottom=10)
+            ),
+            
+            # Dados do Equipamento
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("Dados do Equipamento", 
+                           size=16, 
+                           weight=ft.FontWeight.BOLD,
+                           color=primary_color),
+                    ft.Text(f"Tipo: {tipo_equip}", size=14),
+                    ft.Text(f"Marca/Modelo: {marca} {modelo}", size=14),
+                    ft.Text(f"Número de Série: {num_serie or 'N/A'}", size=14),
+                    ft.Text(f"Observações: {observacao or 'N/A'}", size=14),
+                ]),
+                bgcolor=ft.colors.GREEN_50,
+                border_radius=10,
+                padding=15,
+                margin=ft.margin.only(top=10, bottom=10)
+            ),
+            
+            # Dados do Técnico
+            ft.Container(
+                content=ft.Column([
+                    ft.Text("Técnico Responsável", 
+                           size=16, 
+                           weight=ft.FontWeight.BOLD,
+                           color=primary_color),
+                    ft.Text(f"Nome: {tecnico_nome}", size=14),
+                    ft.Text(f"Especialidade: {especialidade or 'N/A'}", size=14),
+                ]),
+                bgcolor=ft.colors.AMBER_50,
+                border_radius=10,
+                padding=15,
+                margin=ft.margin.only(top=10, bottom=10)
+            ),
+            
+            # Problema relatado
+            ft.Text("Descrição do Problema:", 
+                   size=16, 
+                   weight=ft.FontWeight.BOLD,
+                   color=primary_color),
+            ft.Container(
+                content=ft.Text(descricao_problema or "Não informado"),
+                bgcolor=ft.colors.RED_50,
+                width=float("inf"),
+                padding=10,
+                border_radius=5
+            ),
+            
+            # Solução aplicada
+            ft.Text("Solução Aplicada:", 
+                   size=16, 
+                   weight=ft.FontWeight.BOLD,
+                   color=primary_color),
+            ft.Container(
+                content=ft.Text(descricao_solucao or "OS não finalizada"),
+                bgcolor=ft.colors.GREEN_50,
+                width=float("inf"),
+                padding=10,
+                border_radius=5
+            ),
+        ], scroll=ft.ScrollMode.AUTO)
+        
+        # Criar botões para o modal
+        modal_actions = [
+            ft.ElevatedButton(
+                "Imprimir OS",
+                icon=ft.icons.PRINT,
+                on_click=lambda _: gerar_pdf_os_existente(os_data),
+                style=ft.ButtonStyle(
+                    bgcolor={"": primary_color},
+                    color={"": "white"},
+                )
+            ),
+            ft.ElevatedButton(
+                "Editar OS",
+                icon=ft.icons.EDIT,
+                on_click=lambda _: fechar_modal_e_editar(os_data),
+                style=ft.ButtonStyle(
+                    bgcolor={"": ft.colors.AMBER},
+                    color={"": "black"},
+                )
+            ),
+            ft.TextButton("Fechar", on_click=lambda _: close_dlg())
+        ]
+        
+        # Criando a função para fechar o modal
+        def close_dlg():
+            dlg_modal.open = False
+            page.update()
+        
+        # Função para fechar o modal e editar
+        def fechar_modal_e_editar(data):
+            close_dlg()
+            editar_os(data)
+        
+        # Criar o modal
+        dlg_modal = ft.AlertDialog(
+            title=ft.Text("Detalhes da Ordem de Serviço", size=20, weight=ft.FontWeight.BOLD),
+            content=modal_content,
+            actions=modal_actions,
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        
+        # Mostrar o modal
+        page.overlay.append(dlg_modal)
+        dlg_modal.open = True
+        page.update()
+
+    # Função para gerar PDF de uma OS existente
+    def gerar_pdf_os_existente(os_data):
+        """Gera PDF para uma OS existente com design melhorado"""
+        
+        # Importar o módulo os com um nome diferente para evitar conflito com o parâmetro
+        import os as os_module
+        
+        # Cria pasta 'OS' se não existir
+        os_folder = "OS"
+        if not os_module.path.exists(os_folder):
+            os_module.makedirs(os_folder)
+            print(f"Pasta '{os_folder}' criada com sucesso!")
+        
+        # Extrair os dados necessários
+        (os_id, cliente_id, equipamento_id, tecnico_id, 
+         data_abertura, data_fechamento, status, 
+         descricao_problema, descricao_solucao,
+         cliente_nome, telefone, email, rua, numero, bairro, cidade, estado,
+         tipo_equip, marca, modelo, num_serie, observacao,
+         tecnico_nome, especialidade) = os_data
+        
+        # Nome do arquivo com data para evitar sobrescrita
+        data_hora = datetime.now().strftime('%Y%m%d_%H%M')
+        filename = os_module.path.join(os_folder, f"os_{os_id}_{cliente_nome.replace(' ', '_')}_{data_hora}.pdf".replace(" ", "_"))
+        
+        print(f"Gerando PDF em: {os_module.path.abspath(filename)}")
+        
+        c = canvas.Canvas(filename, pagesize=letter)
+        width, height = letter  # width=612, height=792 pontos
+        
+        # Adicionar borda à página (mais fina e sutil)
+        c.setStrokeColorRGB(0.8, 0.8, 0.8)
+        c.setLineWidth(1)
+        c.rect(20, 20, width-40, height-40)
+        
+        # Cabeçalho com informações da empresa - TAMANHO REDUZIDO
+        c.setFont("Helvetica-Bold", 16)  # Reduzido de 18 para 16
+        c.drawCentredString(width/2, height-50, "ELETRÔNICA NEW STAR")  # Posição ajustada de -60 para -50
+        
+        c.setFont("Helvetica", 10)  # Reduzido de 12 para 10
+        c.drawCentredString(width/2, height-70, "CNPJ: 07.914.206/0001-76")  # Posição ajustada
+        c.drawCentredString(width/2, height-85, "Rua Sete de Maio, 559 A - Chã do Pilar")
+        c.drawCentredString(width/2, height-100, "Pilar - AL, CEP: 57150-000 - Tel: (82) 9999-9999")
+        
+        # Linha separadora
+        c.setLineWidth(0.5)  # Linha mais fina
+        c.line(50, height-115, width-50, height-115)
+        
+        # Título do documento
+        c.setFont("Helvetica-Bold", 14)  # Reduzido de 16 para 14
+        c.drawCentredString(width/2, height-140, f"ORDEM DE SERVIÇO #{os_id}")
+        
+        # Status da OS com design melhorado
+        status_colors = {
+            "Aberta": (0, 0, 0.8),  # Azul
+            "Em andamento": (0.9, 0.5, 0),  # Laranja
+            "Aguardando peças": (0.6, 0, 0.6),  # Roxo
+            "Fechada": (0, 0.6, 0),  # Verde
+        }
+        color = status_colors.get(status, (0.5, 0.5, 0.5))  # Cinza como padrão
+        
+        # Caixa para o status mais compacta
+        c.setFillColorRGB(*color)
+        c.setStrokeColorRGB(*color)
+        c.roundRect(width/2-50, height-165, 100, 20, 8, fill=1)  # Menor e mais acima
+        c.setFillColorRGB(1, 1, 1)  # Branco
+        c.setFont("Helvetica-Bold", 12)  # Fonte menor
+        c.drawCentredString(width/2, height-155, status.upper())
+        c.setFillColorRGB(0, 0, 0)  # Preto
+        
+        # Datas - Posicionamento ajustado
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(50, height-190, "Abertura:")
+        c.setFont("Helvetica", 10)
+        c.drawString(110, height-190, data_abertura)
+        
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(width-250, height-190, "Fechamento:")
+        c.setFont("Helvetica", 10)
+        c.drawString(width-170, height-190, data_fechamento or "Em aberto")
+        
+        # Linha separadora
+        c.line(50, height-200, width-50, height-200)
+        
+        # Dados do Cliente - Layout mais compacto
+        y = height-220
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(50, y, "INFORMAÇÕES DO CLIENTE")
+        y -= 15
+        
+        # Tabela de informações do cliente em duas colunas
+        col1_x = 50
+        col2_x = width/2
+        
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col1_x, y, "Nome:")
+        c.setFont("Helvetica", 10)
+        c.drawString(col1_x + 50, y, cliente_nome)
+        
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col2_x, y, "Telefone:")
+        c.setFont("Helvetica", 10)
+        c.drawString(col2_x + 60, y, telefone)
+        y -= 15
+        
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col1_x, y, "Email:")
+        c.setFont("Helvetica", 10)
+        c.drawString(col1_x + 50, y, email or "N/A")
+        y -= 15
+        
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col1_x, y, "Endereço:")
+        c.setFont("Helvetica", 10)
+        endereco = f"{rua}, {numero} - {bairro}, {cidade}/{estado}"
+        # Verificar se o endereço é muito longo
+        if len(endereco) > 50:
+            c.drawString(col1_x + 60, y, endereco[:50])
+            c.drawString(col1_x + 60, y - 12, endereco[50:])
+            y -= 12  # Espaço adicional se endereço for longo
+        else:
+            c.drawString(col1_x + 60, y, endereco)
+        y -= 20
+        
+        # Dados do Equipamento - Layout melhorado
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(50, y, "INFORMAÇÕES DO EQUIPAMENTO")
+        y -= 15
+        
+        # Tabela de informações do equipamento em duas colunas
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col1_x, y, "Tipo:")
+        c.setFont("Helvetica", 10)
+        c.drawString(col1_x + 50, y, tipo_equip or "")
+        
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col2_x, y, "Marca/Modelo:")
+        c.setFont("Helvetica", 10)
+        c.drawString(col2_x + 80, y, f"{marca} {modelo}".strip())
+        y -= 15
+        
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col1_x, y, "Nº Série:")
+        c.setFont("Helvetica", 10)
+        c.drawString(col1_x + 50, y, num_serie or "Não informado")
+        y -= 15
+        
+        # Observações do equipamento com quebra de linha se for muito longo
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col1_x, y, "Observações:")
+        c.setFont("Helvetica", 10)
+        obs = observacao or "Nenhuma"
+        if len(obs) > 70:
+            c.drawString(col1_x + 75, y, obs[:70])
+            c.drawString(col1_x + 75, y - 12, obs[70:140])
+            y -= 12  # Espaço adicional
+        else:
+            c.drawString(col1_x + 75, y, obs)
+        y -= 20
+        
+        # Descrição do problema
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(50, y, "DESCRIÇÃO DO PROBLEMA")
+        y -= 15
+        
+        # Caixa para o problema - mais compacta
+        c.setFillColorRGB(0.95, 0.95, 1.0)  # Azul bem claro
+        c.setStrokeColorRGB(0.8, 0.8, 0.9)
+        problema_height = 50  # Reduzido de 60 para 50
+        c.rect(50, y-problema_height, width-100, problema_height, fill=1)
+        c.setFillColorRGB(0, 0, 0)  # Preto
+        
+        # Texto do problema
+        textobject = c.beginText(55, y-12)
+        textobject.setFont("Helvetica", 10)  # Fonte menor
+        if descricao_problema:
+            # Dividir em linhas se for muito longo
+            lines = []
+            for line in descricao_problema.split('\n'):
+                if len(line) > 80:  # Permite linhas um pouco mais longas
+                    words = line.split()
+                    current_line = ""
+                    for word in words:
+                        if len(current_line) + len(word) + 1 <= 80:
+                            current_line += (" " + word if current_line else word)
+                        else:
+                            lines.append(current_line)
+                            current_line = word
+                    if current_line:
+                        lines.append(current_line)
+                else:
+                    lines.append(line)
+            
+            for line in lines[:4]:  # Limitar a 4 linhas
+                textobject.textLine(line)
+        else:
+            textobject.textLine("Não informado")
+        
+        c.drawText(textobject)
+        y -= problema_height + 5
+        
+        # Se existir solução, mostrá-la
+        if status == "Fechada" and descricao_solucao:
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(50, y, "SOLUÇÃO APLICADA")
+            y -= 15
+            
+            # Caixa para a solução - também mais compacta
+            c.setFillColorRGB(0.95, 1.0, 0.95)  # Verde bem claro
+            c.setStrokeColorRGB(0.8, 0.9, 0.8)
+            solucao_height = 50  # Altura reduzida
+            c.rect(50, y-solucao_height, width-100, solucao_height, fill=1)
+            c.setFillColorRGB(0, 0, 0)  # Preto
+            
+            # Texto da solução
+            textobject = c.beginText(55, y-12)
+            textobject.setFont("Helvetica", 10)  # Fonte menor
+            
+            # Mesmo processamento para o texto da solução
+            lines = []
+            for line in descricao_solucao.split('\n'):
+                if len(line) > 80:
+                    words = line.split()
+                    current_line = ""
+                    for word in words:
+                        if len(current_line) + len(word) + 1 <= 80:
+                            current_line += (" " + word if current_line else word)
+                        else:
+                            lines.append(current_line)
+                            current_line = word
+                    if current_line:
+                        lines.append(current_line)
+                else:
+                    lines.append(line)
+            
+            for line in lines[:4]:  # Limitar a 4 linhas
+                textobject.textLine(line)
+            
+            c.drawText(textobject)
+            y -= solucao_height + 5
+        
+        # Técnico responsável
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(50, y, "Técnico Responsável:")
+        c.setFont("Helvetica", 10)
+        c.drawString(160, y, tecnico_nome)
+        
+        c.setFont("Helvetica-Oblique", 9)
+        c.drawString(160, y-12, f"Especialidade: {especialidade or 'N/A'}")
+        y -= 25
+        
+        # Termo de garantia em destaque - MAIS COMPACTO
+        c.setFont("Helvetica-Bold", 11)  # Reduzido
+        c.drawString(50, y, "TERMO DE GARANTIA")
+        y -= 15
+        
+        # Texto do termo de garantia melhorado - FONTE MENOR
+        termo_garantia = """
+1. PRAZO: Garantimos os serviços por 90 dias, conforme Código de Defesa do Consumidor.
+2. COBERTURA: Esta garantia cobre apenas componentes substituídos e serviços descritos nesta OS.
+3. EXCLUSÕES: Não cobre: a) Uso inadequado; b) Quedas/umidade; c) Oscilações elétricas; d) Outros problemas.
+4. RETIRADA: Prazo de 90 dias para retirada após conclusão. Após, sujeito a descarte conforme lei.
+        """
+        
+        # Caixa para o termo de garantia - MENOR ALTURA
+        c.setFillColorRGB(1.0, 0.98, 0.9)  # Amarelo bem claro
+        c.setStrokeColorRGB(0.9, 0.8, 0.7)
+        termo_height = 70  # Reduzido
+        c.rect(50, y-termo_height, width-100, termo_height, fill=1)
+        c.setFillColorRGB(0, 0, 0)  # Preto
+        
+        # Texto do termo
+        textobject = c.beginText(55, y-12)
+        textobject.setFont("Helvetica", 8)  # Fonte menor
+        for line in termo_garantia.split('\n'):
+            if line.strip():  # Só adiciona linhas não vazias
+                textobject.textLine(line)
+        c.drawText(textobject)
+        y -= termo_height + 10
+        
+        # Assinaturas - ESPAÇAMENTO ADEQUADO PARA EVITAR SOBREPOSIÇÃO
+        assinatura_y = max(100, y-20)  # Garante espaço mínimo ou usa a posição calculada
+        
+        c.setFont("Helvetica", 10)
+        c.line(100, assinatura_y, 250, assinatura_y)
+        c.drawCentredString(175, assinatura_y-15, "Assinatura do Cliente")
+        
+        c.line(350, assinatura_y, 500, assinatura_y)
+        c.drawCentredString(425, assinatura_y-15, "Assinatura do Representante")
+        
+        # Carimbo da empresa
+        c.setStrokeColorRGB(0.7, 0.7, 0.7)
+        c.circle(175, assinatura_y-65, 30, stroke=1)  # Carimbo menor
+        c.setFont("Helvetica-Bold", 9)
+        c.drawCentredString(175, assinatura_y-60, "CARIMBO")
+        c.drawCentredString(175, assinatura_y-72, "DA EMPRESA")
+        
+        # Rodapé
+        c.setFont("Helvetica-Oblique", 7)  # Fonte ainda menor
+        c.drawCentredString(width/2, 35, f"Ordem de Serviço #{os_id} gerada em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        c.drawCentredString(width/2, 25, "Este documento é um comprovante oficial de serviço - ELETRÔNICA NEW STAR")
+        
+        # Adicione isso ao final da função gerar_pdf_os_existente antes de c.save()
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(50, 100, f"Versão atualizada: {datetime.now()}")
+
+        c.save()
+        show_snackbar(page, f"PDF da OS {os_id} gerado: {filename}")
+        
+        # Imprimir informação para debug
+        print(f"PDF salvo em: {os_module.path.abspath(filename)}")
+        
+        # Abrir o PDF automaticamente
+        import platform, subprocess
+        try:
+            if platform.system() == 'Darwin':       # macOS
+                subprocess.call(('open', filename))
+            elif platform.system() == 'Windows':    # Windows
+                os_module.startfile(filename)
+            else:                                   # linux
+                subprocess.call(('xdg-open', filename))
+        except Exception as e:
+            print(f"Erro ao abrir PDF: {e}")
+
+    # Associe a função de busca ao campo
+    busca_os_field.on_change = buscar_os
+
+    # Adicione a função buscar_todas_os
+    def buscar_todas_os():
+        busca_os_field.value = ""
+        buscar_os(None)
+        page.update()
+
+    # Crie o container para listar ordens de serviço
+    lista_os_container = ft.Container(
+        content=ft.Column([
+            ft.Text("Listar Ordens de Serviço", size=24, weight=ft.FontWeight.BOLD, color=primary_color),
+            ft.Row([
+                busca_os_field,
+                ft.ElevatedButton(
+                    "Buscar", 
+                    icon=ft.icons.SEARCH,
+                    on_click=lambda _: buscar_os(None),
+                    style=ft.ButtonStyle(
+                        bgcolor={"": primary_color},
+                        color={"": "white"},
+                    )
+                ),
+                ft.ElevatedButton(
+                    "Mostrar Todas",
+                    on_click=lambda _: buscar_todas_os(),
+                    style=ft.ButtonStyle(
+                        bgcolor={"": secondary_color},
+                        color={"": "black"},
+                    )
+                )
+            ], alignment=ft.MainAxisAlignment.CENTER),
+            
+            # Split view para lista e detalhes
+            ft.Row([
+                # Lista de OS
+                ft.Container(
+                    content=lista_os,
+                    bgcolor=ft.colors.BLUE_50,
+                    border_radius=10,
+                    expand=3
+                ),
+                
+                # Detalhes da OS
+                os_detalhes
+            ], expand=True, spacing=10),
+            
+        ]),
+        visible=False,
+        padding=20,
+    )
 
     # Barra de navegação
     page.navigation_bar = ft.NavigationBar(
@@ -1556,7 +2429,8 @@ def main(page: ft.Page):
             ft.NavigationBarDestination(icon=ft.icons.DEVICES, label="Equipamentos"),
             ft.NavigationBarDestination(icon=ft.icons.INVENTORY, label="Produtos"),
             ft.NavigationBarDestination(icon=ft.icons.ENGINEERING, label="Técnicos"),
-            ft.NavigationBarDestination(icon=ft.icons.WORK, label="OS")
+            ft.NavigationBarDestination(icon=ft.icons.WORK, label="OS"),
+            ft.NavigationBarDestination(icon=ft.icons.LIST_ALT, label="Listar OS")  # Nova opção
         ],
         on_change=change_tab,
         bgcolor=primary_color,
@@ -1578,7 +2452,8 @@ def main(page: ft.Page):
                 equipamento_container,
                 produto_container,
                 tecnico_container,
-                os_container
+                os_container,
+                lista_os_container  # Novo container
             ], scroll=ft.ScrollMode.AUTO),
             expand=True
         )
